@@ -4,6 +4,23 @@ import { SURGE_CONFIG, SURGE_SITE_RULE_SET_BASEURL, SURGE_IP_RULE_SET_BASEURL, g
 import { addProxyWithDedup } from './helpers/proxyHelpers.js';
 import { buildSelectorMembers, buildNodeSelectMembers, buildCustomRuleMembers, uniqueNames } from './helpers/groupBuilder.js';
 
+// 机场订阅常在节点列表里塞「剩余流量 / 距离下次重置 / 套餐到期 / 官网」这类假节点。
+// 转成 Surge 节点后它们会真的出现在策略组里，选中即断网，所以在生成前丢弃。
+const ADVERT_NODE_MARKERS = [
+    '剩余流量', '距离下次', '套餐到期', '官网：', '官网:',
+    'Expire', 'Reset', 'Traffic', '剩余', '重置'
+];
+
+function isAdvertNode(tag) {
+    if (typeof tag !== 'string') return false;
+    return ADVERT_NODE_MARKERS.some(marker => tag.includes(marker));
+}
+
+// Surge 用逗号分隔字段、等号分隔键值，节点名里出现会拆坏整行
+function toSurgeName(tag) {
+    return String(tag ?? '').replace(/,/g, '，').replace(/=/g, '-').trim();
+}
+
 export class SurgeConfigBuilder extends BaseConfigBuilder {
     constructor(inputString, selectedRules, customRules, baseConfig, lang, userAgent, groupByCountry, includeAutoSelect = true) {
         const resolvedBaseConfig = baseConfig ?? SURGE_CONFIG;
@@ -47,6 +64,10 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
     }
 
     convertProxy(proxy) {
+        // 假节点（机场广告位）直接丢弃，不写进配置也不进策略组
+        if (isAdvertNode(proxy?.tag)) {
+            return null;
+        }
         let surgeProxy;
         switch (proxy.type) {
             case 'shadowsocks':
@@ -78,6 +99,52 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                     surgeProxy += `, grpc-service-name=${proxy.transport.service_name}`;
                 }
                 break;
+            case 'vless': {
+                const name = toSurgeName(proxy.tag);
+                surgeProxy = `${name} = vless, ${proxy.server}, ${proxy.server_port}, username=${proxy.uuid}`;
+                const reality = proxy.tls?.reality;
+                const hasReality = !!(reality?.enabled && reality.public_key);
+                if (proxy.flow) {
+                    surgeProxy += `, flow=${proxy.flow}`;
+                }
+                if (proxy.tls?.server_name) {
+                    surgeProxy += `, sni=${proxy.tls.server_name}`;
+                }
+                if (hasReality) {
+                    surgeProxy += `, reality-public-key=${reality.public_key}`;
+                    if (reality.short_id) {
+                        surgeProxy += `, reality-short-id=${reality.short_id}`;
+                    }
+                }
+                if (proxy.transport?.type === 'ws') {
+                    surgeProxy += ', ws=true';
+                    if (proxy.transport.path) {
+                        surgeProxy += `, ws-path=${proxy.transport.path}`;
+                    }
+                    const host = proxy.transport.headers?.host ?? proxy.transport.headers?.Host;
+                    if (host) {
+                        surgeProxy += `, ws-headers=Host:\"${host}\"`;
+                    }
+                    // REALITY 自带 TLS，只有非 REALITY 的 ws 才需要显式 tls=true
+                    if (proxy.tls?.enabled && !hasReality) {
+                        surgeProxy += ', tls=true';
+                    }
+                } else if (proxy.transport?.type === 'grpc') {
+                    surgeProxy += ', grpc=true';
+                    if (proxy.transport.service_name) {
+                        surgeProxy += `, grpc-service-name=${proxy.transport.service_name}`;
+                    }
+                    if (proxy.tls?.enabled && !hasReality) {
+                        surgeProxy += ', tls=true';
+                    }
+                } else if (proxy.tls?.enabled && !hasReality) {
+                    surgeProxy += ', tls=true';
+                }
+                if (proxy.tls?.insecure) {
+                    surgeProxy += ', skip-cert-verify=true';
+                }
+                break;
+            }
             case 'trojan':
                 surgeProxy = `${proxy.tag} = trojan, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}`;
                 if (proxy.tls?.server_name) {
