@@ -21,6 +21,58 @@ function toSurgeName(tag) {
     return String(tag ?? '').replace(/,/g, '，').replace(/=/g, '-').trim();
 }
 
+// Official TLS params: quote alpn when it has multiple entries
+function formatSurgeAlpn(alpn) {
+    if (!alpn) return null;
+    const list = Array.isArray(alpn) ? alpn : String(alpn).split(',');
+    const values = list.map(value => String(value).trim()).filter(Boolean);
+    if (values.length === 0) return null;
+    const joined = values.join(',');
+    return values.length > 1 ? `alpn="${joined}"` : `alpn=${joined}`;
+}
+
+function hasRealitySecurity(proxy) {
+    const reality = proxy.tls?.reality;
+    return !!(reality?.enabled && reality.public_key);
+}
+
+// Surge only supports a subset of VLESS transports / security / flow combos
+function unsupportedVlessReason(proxy) {
+    const encryption = proxy.encryption;
+    if (encryption && String(encryption).toLowerCase() !== 'none') {
+        return `Unsupported VLESS encryption: ${encryption}`;
+    }
+
+    const rawType = proxy.transport?.type;
+    const transportType = String(rawType || 'tcp').toLowerCase();
+    const isRaw = transportType === 'tcp' || transportType === 'raw';
+    const isWs = transportType === 'ws';
+    const isGrpc = transportType === 'grpc';
+    const reality = hasRealitySecurity(proxy);
+    const tls = !!proxy.tls?.enabled;
+    const vision = !!proxy.flow;
+
+    if (!isRaw && !isWs && !isGrpc) {
+        return `Unsupported VLESS transport: ${rawType || transportType}`;
+    }
+    if (isWs && reality) {
+        return 'Unsupported VLESS combo: WebSocket + REALITY';
+    }
+    if (isGrpc && !tls && !reality) {
+        return 'Unsupported VLESS combo: gRPC without TLS';
+    }
+    if (vision && !tls && !reality) {
+        return 'Unsupported VLESS combo: Vision without TLS';
+    }
+    if (vision && isWs) {
+        return 'Unsupported VLESS combo: Vision + WebSocket';
+    }
+    if (vision && isGrpc) {
+        return 'Unsupported VLESS combo: Vision + gRPC';
+    }
+    return null;
+}
+
 export class SurgeConfigBuilder extends BaseConfigBuilder {
     constructor(inputString, selectedRules, customRules, baseConfig, lang, userAgent, groupByCountry, includeAutoSelect = true) {
         const resolvedBaseConfig = baseConfig ?? SURGE_CONFIG;
@@ -68,13 +120,14 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
         if (isAdvertNode(proxy?.tag)) {
             return null;
         }
+        const name = toSurgeName(proxy.tag);
         let surgeProxy;
         switch (proxy.type) {
             case 'shadowsocks':
-                surgeProxy = `${proxy.tag} = ss, ${proxy.server}, ${proxy.server_port}, encrypt-method=${proxy.method}, password=${proxy.password}`;
+                surgeProxy = `${name} = ss, ${proxy.server}, ${proxy.server_port}, encrypt-method=${proxy.method}, password=${proxy.password}`;
                 break;
             case 'vmess':
-                surgeProxy = `${proxy.tag} = vmess, ${proxy.server}, ${proxy.server_port}, username=${proxy.uuid}`;
+                surgeProxy = `${name} = vmess, ${proxy.server}, ${proxy.server_port}, username=${proxy.uuid}`;
                 if (proxy.alter_id == 0) {
                     surgeProxy += ', vmess-aead=true';
                 }
@@ -100,10 +153,14 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                 }
                 break;
             case 'vless': {
-                const name = toSurgeName(proxy.tag);
+                const reason = unsupportedVlessReason(proxy);
+                if (reason) {
+                    surgeProxy = `# ${name} - ${reason}`;
+                    break;
+                }
                 surgeProxy = `${name} = vless, ${proxy.server}, ${proxy.server_port}, username=${proxy.uuid}`;
                 const reality = proxy.tls?.reality;
-                const hasReality = !!(reality?.enabled && reality.public_key);
+                const hasReality = hasRealitySecurity(proxy);
                 if (proxy.flow) {
                     surgeProxy += `, flow=${proxy.flow}`;
                 }
@@ -134,6 +191,12 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                     if (proxy.transport.service_name) {
                         surgeProxy += `, grpc-service-name=${proxy.transport.service_name}`;
                     }
+                    if (String(proxy.transport.mode || '').toLowerCase() === 'multi') {
+                        surgeProxy += ', grpc-mode=multi';
+                    }
+                    if (proxy.transport.authority) {
+                        surgeProxy += `, grpc-authority=${proxy.transport.authority}`;
+                    }
                     if (proxy.tls?.enabled && !hasReality) {
                         surgeProxy += ', tls=true';
                     }
@@ -143,10 +206,14 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                 if (proxy.tls?.insecure) {
                     surgeProxy += ', skip-cert-verify=true';
                 }
+                const alpn = formatSurgeAlpn(proxy.tls?.alpn);
+                if (alpn && (proxy.tls?.enabled || hasReality)) {
+                    surgeProxy += `, ${alpn}`;
+                }
                 break;
             }
             case 'trojan':
-                surgeProxy = `${proxy.tag} = trojan, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}`;
+                surgeProxy = `${name} = trojan, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}`;
                 if (proxy.tls?.server_name) {
                     surgeProxy += `, sni=${proxy.tls.server_name}`;
                 }
@@ -166,7 +233,7 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                 }
                 break;
             case 'hysteria2':
-                surgeProxy = `${proxy.tag} = hysteria2, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}`;
+                surgeProxy = `${name} = hysteria2, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}`;
                 if (proxy.tls?.server_name) {
                     surgeProxy += `, sni=${proxy.tls.server_name}`;
                 }
@@ -178,7 +245,7 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                 }
                 break;
             case 'tuic':
-                surgeProxy = `${proxy.tag} = tuic, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}, uuid=${proxy.uuid}`;
+                surgeProxy = `${name} = tuic, ${proxy.server}, ${proxy.server_port}, password=${proxy.password}, uuid=${proxy.uuid}`;
                 if (proxy.tls?.server_name) {
                     surgeProxy += `, sni=${proxy.tls.server_name}`;
                 }
@@ -196,7 +263,7 @@ export class SurgeConfigBuilder extends BaseConfigBuilder {
                 }
                 break;
             default:
-                surgeProxy = `# ${proxy.tag} - Unsupported proxy type: ${proxy.type}`;
+                surgeProxy = `# ${name} - Unsupported proxy type: ${proxy.type}`;
         }
         return surgeProxy;
     }

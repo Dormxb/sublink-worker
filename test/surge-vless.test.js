@@ -106,3 +106,127 @@ describe('Surge VLESS conversion', () => {
         expect(line.trim().startsWith('HK，01-a =')).toBe(true);
     });
 });
+
+describe('Surge VLESS unsupported combinations', () => {
+    function groupSection(result) {
+        const match = result.match(/\[Proxy Group\]([\s\S]*?)(?=\n\[|$)/);
+        expect(match).not.toBeNull();
+        return match[1];
+    }
+
+    it('emits a comment for WebSocket + REALITY and keeps it out of proxy groups', async () => {
+        const result = await build(
+            [
+                `vless://${UUID}@ws.example.com:443?encryption=none&security=reality&type=ws` +
+                '&pbk=PUBKEY&sid=abcd&sni=www.apple.com&path=%2Fws#WS-REALITY',
+                `vless://${UUID}@ok.example.com:443?encryption=none&security=tls&type=ws&path=%2Fok#OK-WS`
+            ].join('\n')
+        );
+
+        expect(proxySection(result)).toContain('# WS-REALITY - Unsupported VLESS combo: WebSocket + REALITY');
+        expect(proxyLine(result, 'WS-REALITY')).toBeUndefined();
+        expect(proxyLine(result, 'OK-WS')).toBeDefined();
+        expect(groupSection(result)).not.toContain('WS-REALITY');
+        expect(groupSection(result)).toContain('OK-WS');
+    });
+
+    it('emits a comment for gRPC without TLS and keeps it out of proxy groups', async () => {
+        const result = await build(
+            `vless://${UUID}@grpc.example.com:443?encryption=none&security=none&type=grpc&serviceName=mygrpc#PLAIN-GRPC`
+        );
+
+        expect(proxySection(result)).toContain('# PLAIN-GRPC - Unsupported VLESS combo: gRPC without TLS');
+        expect(proxyLine(result, 'PLAIN-GRPC')).toBeUndefined();
+        expect(groupSection(result)).not.toContain('PLAIN-GRPC');
+    });
+
+    it('emits a comment for XHTTP transport', async () => {
+        const result = await build(
+            `vless://${UUID}@x.example.com:443?encryption=none&security=tls&type=xhttp&path=%2Fx#XHTTP-NODE`
+        );
+
+        expect(proxySection(result)).toContain('# XHTTP-NODE - Unsupported VLESS transport: xhttp');
+        expect(proxyLine(result, 'XHTTP-NODE')).toBeUndefined();
+        expect(groupSection(result)).not.toContain('XHTTP-NODE');
+    });
+
+    it('emits a comment for HTTPUpgrade transport', async () => {
+        const result = await build(
+            `vless://${UUID}@h.example.com:443?encryption=none&security=tls&type=httpupgrade&path=%2Fh#HUP-NODE`
+        );
+
+        expect(proxySection(result)).toContain('# HUP-NODE - Unsupported VLESS transport: httpupgrade');
+        expect(proxyLine(result, 'HUP-NODE')).toBeUndefined();
+        expect(groupSection(result)).not.toContain('HUP-NODE');
+    });
+
+    it('emits a comment when encryption is not none', async () => {
+        const result = await build(
+            `vless://${UUID}@e.example.com:443?encryption=mlkem768x25519plus&security=tls&type=tcp#ENC-NODE`
+        );
+
+        expect(proxySection(result)).toContain('# ENC-NODE - Unsupported VLESS encryption: mlkem768x25519plus');
+        expect(proxyLine(result, 'ENC-NODE')).toBeUndefined();
+        expect(groupSection(result)).not.toContain('ENC-NODE');
+    });
+
+    it('emits a comment for Vision + WebSocket', async () => {
+        const result = await build(
+            `vless://${UUID}@ws.example.com:443?encryption=none&security=tls&type=ws` +
+            '&path=%2Fws&flow=xtls-rprx-vision#VISION-WS'
+        );
+
+        expect(proxySection(result)).toContain('# VISION-WS - Unsupported VLESS combo: Vision + WebSocket');
+        expect(proxyLine(result, 'VISION-WS')).toBeUndefined();
+        expect(groupSection(result)).not.toContain('VISION-WS');
+    });
+});
+
+describe('Surge name sanitization for all proxy types', () => {
+    it('sanitizes commas and equals in ss and trojan names', async () => {
+        const result = await build(
+            [
+                'ss://YWVzLTEyOC1nY206dGVzdA@ss.example.com:443#SS,01=a',
+                'trojan://pass@tj.example.com:443?security=tls&sni=tj.example.com#TJ,01=a'
+            ].join('\n')
+        );
+
+        const lines = proxySection(result).split('\n').map(item => item.trim()).filter(Boolean);
+        expect(lines.some(line => line.startsWith('SS，01-a = ss, ss.example.com, 443'))).toBe(true);
+        expect(lines.some(line => line.startsWith('TJ，01-a = trojan, tj.example.com, 443'))).toBe(true);
+
+        const groupMatch = result.match(/\[Proxy Group\]([\s\S]*?)(?=\n\[|$)/);
+        expect(groupMatch[1]).toContain('SS，01-a');
+        expect(groupMatch[1]).toContain('TJ，01-a');
+        expect(groupMatch[1]).not.toContain('SS,01');
+        expect(groupMatch[1]).not.toContain('TJ,01');
+    });
+});
+
+describe('Surge VLESS extra parameter mapping', () => {
+    it('maps alpn on a WebSocket + TLS node and quotes multiple values', async () => {
+        const result = await build(
+            `vless://${UUID}@ws.example.com:443?encryption=none&security=tls&type=ws` +
+            '&host=cdn.example.com&path=%2Fws&sni=cdn.example.com&alpn=h2,http%2F1.1#WS-ALPN'
+        );
+
+        const line = proxyLine(result, 'WS-ALPN');
+        expect(line).toContain('ws=true');
+        expect(line).toContain('tls=true');
+        expect(line).toContain('alpn="h2,http/1.1"');
+    });
+
+    it('maps grpc-authority and grpc-mode=multi', async () => {
+        const result = await build(
+            `vless://${UUID}@grpc.example.com:443?encryption=none&security=tls&type=grpc` +
+            '&serviceName=mygrpc&authority=grpc.example.com&mode=multi&sni=grpc.example.com#GRPC-MULTI'
+        );
+
+        const line = proxyLine(result, 'GRPC-MULTI');
+        expect(line).toContain('grpc=true');
+        expect(line).toContain('grpc-service-name=mygrpc');
+        expect(line).toContain('grpc-mode=multi');
+        expect(line).toContain('grpc-authority=grpc.example.com');
+        expect(line).toContain('tls=true');
+    });
+});

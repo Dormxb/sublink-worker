@@ -1,4 +1,4 @@
-import { parseServerInfo, parseUrlParams, createTlsConfig, createTransportConfig, parseBool } from '../../utils.js';
+import { parseServerInfo, parseUrlParams, createTlsConfig, createTransportConfig, parseBool, parseArray } from '../../utils.js';
 
 export function parseVless(url) {
     const { addressPart, params, name } = parseUrlParams(url);
@@ -12,7 +12,20 @@ export function parseVless(url) {
             fingerprint: 'chrome'
         };
     }
+    const alpn = parseArray(params.alpn);
+    if (alpn) {
+        tls.alpn = alpn;
+    }
     const transport = params.type !== 'tcp' ? createTransportConfig(params) : undefined;
+    // Share-link extras used by Surge; sing-box strips unknown keys later
+    if (transport?.type === 'grpc') {
+        if (params.authority) {
+            transport.authority = params.authority;
+        }
+        if (params.mode) {
+            transport.mode = params.mode;
+        }
+    }
 
     // `udp` is a Clash-only flag; ClashConfigBuilder reads it, SingboxConfigBuilder strips it.
     const udp = params.udp !== undefined ? parseBool(params.udp) : undefined;
@@ -27,6 +40,7 @@ export function parseVless(url) {
         tls,
         transport,
         flow: params.flow ?? undefined,
+        ...(params.encryption !== undefined ? { encryption: params.encryption } : {}),
         ...(udp !== undefined ? { udp } : {})
     };
 }

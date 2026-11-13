@@ -94,6 +94,14 @@ export class SingboxConfigBuilder extends BaseConfigBuilder {
         // Remove packet_encoding for now - it's version-specific in sing-box
         // xudp is default in newer versions
         delete sanitized.packet_encoding;
+        // VLESS share-link fields that Surge consumes but sing-box rejects
+        delete sanitized.encryption;
+        if (sanitized.transport && typeof sanitized.transport === 'object') {
+            const transport = { ...sanitized.transport };
+            delete transport.authority;
+            delete transport.mode;
+            sanitized.transport = transport;
+        }
 
         if (sanitized.type === 'hysteria2') {
             // sing-box names port-hopping/bandwidth fields differently from the
